@@ -1,0 +1,166 @@
+---
+title: "Practical ML Assignment"
+author: "Ganna Androsova"
+date: "6/26/2017"
+output: html_document
+---
+
+```{r, warning=FALSE, echo=FALSE, message=FALSE}
+library(caret)
+library(dplyr)
+library(reshape2)
+library(ggplot2)
+library(randomForest)
+```
+
+
+### Background
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset).
+
+### Data
+
+The training data for this project are available here:
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here:
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+The data for this project come from this source: http://groupware.les.inf.puc-rio.br/har. If you use the document you create for this class for any purpose please cite them as they have been very generous in allowing their data to be used for this kind of assignment.
+
+```{r}
+#Load the data sets
+testing = read.csv("pml-testing.csv", header = TRUE, na.strings = c("NA", ""))
+training = read.csv("pml-training.csv", header = TRUE, na.strings = c("NA", ""))
+```
+
+### Preprocess the data sets
+
+Remove columns that have more then 90% of missing values (NAs) as well as discriptive columns such as user name, etc.
+
+```{r}
+na_cols = apply(training, 2, function(x){
+  length(which(is.na(x) == TRUE))/length(x) < 0.9
+})
+training = training %>% 
+  tbl_df() %>% 
+  dplyr::select_(.dots = names(which(na_cols == TRUE))) %>% 
+  dplyr::select(-X, -user_name, -new_window, -raw_timestamp_part_1, -raw_timestamp_part_2, -cvtd_timestamp)
+```
+
+Split the training set into sub-training and validation. Validation will be required for model validation.
+
+```{r}
+inTrain = createDataPartition(y = training$classe, p = 0.7, list = FALSE)
+sub_training = training[inTrain,]
+validation = training[-inTrain,]
+dim(sub_training)
+dim(validation)
+```
+
+Sub-training set has 53 potential predictors (54 - 1 outcome column) with 13737 observations, while validation set contains 5885 observations.
+
+### Exploratory data analysis
+
+First, we will check if there is a linear correlation between predictors and outcome variable.
+
+```{r, warning=FALSE, fig.width=8, fig.height=8}
+cormat <- round(cor(sub_training[,-54]),2)
+
+reorder_cormat <- function(cormat){
+  # Use correlation between variables as distance
+  dd <- as.dist((1-cormat)/2)
+  hc <- hclust(dd)
+  cormat <-cormat[hc$order, hc$order]
+}
+
+# Reorder the correlation matrix
+cormat <- reorder_cormat(cormat)
+cormat[lower.tri(cormat)]<- NA
+
+# Melt the correlation matrix
+melted_cormat <- melt(cormat, na.rm = TRUE)
+# Create a ggheatmap
+ggplot(melted_cormat, aes(Var2, Var1, fill = value))+
+ geom_tile(color = "white")+
+ scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+   midpoint = 0, limit = c(-1,1), space = "Lab", 
+    name="Pearson\nCorrelation") +
+  theme_minimal()+ # minimal theme
+ theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+    size = 8, hjust = 1))+
+ coord_fixed()+
+theme(
+  axis.title.x = element_blank(),
+  axis.title.y = element_blank(),
+  panel.grid.major = element_blank(),
+  panel.border = element_blank(),
+  panel.background = element_blank(),
+  axis.ticks = element_blank(),
+  legend.justification = c(1, 0),
+  legend.position = c(0.6, 0.7),
+  legend.direction = "horizontal")+
+  guides(fill = guide_colorbar(barwidth = 7, barheight = 1,
+                title.position = "top", title.hjust = 0.5))
+```
+
+We can see a strong positive correlation between gyros_dumbbell and gyros_forearm (red triangle on the bottom left). There is also a strong negative correlation in several parts on the graph.
+
+### Model selection
+
+To capture linear relationships in the data set, I will use linear discrimination analysis. To identify non-linearly correlated predictors with the outcome variable, I will use random forest. I am interested to compare accuracy and testing error for each method separately, and conclude which model suits the given data best.
+
+```{r, cache=TRUE, message=FALSE, warning=FALSE}
+set.seed(233)
+mod_lda = train(classe~., method = "lda",
+                data = sub_training)
+lda_pred <- predict(mod_lda, newdata=validation)
+accuracy_lda = confusionMatrix(lda_pred, validation$classe)$overall
+accuracy_lda
+```
+
+Accuracy of linear discrimination analysis is 0.708 and estimated out-of-sample error is `r 1-accuracy_lda["Accuracy"]` with cross validation.
+
+```{r, cache=TRUE, message=FALSE, warning=FALSE}
+mod_rf = randomForest(classe~., data=sub_training, importance=TRUE)
+rf_pred <- predict(mod_rf, newdata=validation)
+accuracy_rf = confusionMatrix(rf_pred, validation$classe)$overall
+accuracy_rf
+```
+
+Accuracy of random forest is 0.998, and estimated out-of-sample error is `r 1-accuracy_rf["Accuracy"]` with cross validation.
+
+Let's see if the predicted values agree.
+
+```{r}
+table(lda_pred, rf_pred)
+```
+
+For some classes (A, C and D) predictions strongly overlap, however many variables are assigned to different classes. 
+
+Based on the accuracy values, I continue the analysis of the testing data (so far unseen) with fandom forest model.
+
+### Variable importance
+
+For the random forest model, there is a high accuracy, however sometime we decrease interpretability.
+Let's check the top 10 most important predictors.
+
+```{r, warning=FALSE, message=FALSE, fig.width=10, fig.height=5}
+varImpPlot(mod_rf, n.var=10, main="Top 10 Variable Importance")
+```
+
+
+### Prediction of classes
+
+Ii the final section, I apply random forest tested model for the new data set. The task requires to 
+predict the 20 outcomes based on the available data.
+
+```{r}
+predict(mod_rf, testing)
+```
+
+**Final conclusions**: all predicted values matched the final quiz, thus the model was correctly picked.
+
+
+
+
